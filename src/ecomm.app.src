@@ -1,0 +1,7 @@
+{application, ecomm,
+    [{description, "Erlang Common Communication Components"},
+     {vsn, "0.0.1"},
+     {registered, []},
+     {applications, [kernel, stdlib]},
+     {mod, {ecomm_app, []}}
+    ]}.
