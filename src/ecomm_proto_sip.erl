@@ -13,12 +13,16 @@ decode(Message) when is_binary(Message) ->
     case decode_as_proplist(Message) of
 	[_ | _] = Props ->
 	    Get = fun (K) -> ecomm_util_proplist:getv(K, Props) end,
-	    ReqVals =  [Get(K) || K <- [[meta, method], [meta, uri], headers, multipart]],
+	    ReqVals = [Get(K) || K <- [[meta, method], [meta, uri], headers]],
+	    ReqBody = case ecomm_util_proplist:mgetv([multipart, body], Props) of
+			  {_, [multipart, body]} -> [undefined];
+			  {[MultiPart, _], [body]} -> [MultiPart];
+			  {[_, Body], [multipart]} -> [Body]
+		      end,
+	    Request = list_to_tuple([sip_request | ReqVals] ++ ReqBody),
 	    case Get(next_request_chunk) of
-		undefined ->
-		    {ok, list_to_tuple([sip_request | ReqVals])};
-		Next ->
-		    {ok, list_to_tuple([sip_request | ReqVals]), Next}
+		undefined -> {ok, Request};
+		Next -> {ok, Request, Next}
 	    end;
 	Other ->
 	    Other
@@ -77,19 +81,24 @@ decode_body(Props) ->
 		    incomplete;
 	       true ->
 		    <<ReqBody:CSize/binary, Next/binary>> = BodyChunk,
-		    ecomm_util_proplist:del([chunks], Props) ++
-			decode_multipart_bodies(ReqBody) ++
+		    Bodies = decode_multipart_bodies(ReqBody),
+		    ecomm_util_proplist:del([chunks], Props) ++ Bodies ++
 			if size(Next) == 0 -> []; 
 			   true -> [{next_request_chunk, Next}] 
 			end
 	    end
     end.
 
-decode_multipart_bodies(Payload) ->
+
+decode_multipart_bodies(<<"--MIME_boundary", _/binary>> = Payload) ->
     [Boundary, Rest] = binary:split(Payload, ?NL),
     Rest1 = binary:part(Rest, 0, size(Rest) - size(<<"--", ?NL/binary>>)), 
     PartBodies = binary:split(Rest1, Boundary, [global, trim]),
-    [{multipart, [decode_multipart_body(PartBody) || PartBody <-  PartBodies]}].
+    [{multipart, [decode_multipart_body(PartBody) || PartBody <-  PartBodies]}];
+decode_multipart_bodies(<<>>) ->
+    [];
+decode_multipart_bodies(Payload) ->
+    [{body, Payload}].
 
 decode_multipart_body(Body) ->
     [HeadersChunk, ContentChunk] = binary:split(Body, ?BL, [trim]),
