@@ -1,6 +1,7 @@
 -module(ecomm_proto_sip).
 
 -export([decode/1, decode_as_proplist/1, parse_multipart/1]).
+-export([encode/1]).
 
 %%%==============================================
 %%% Basic parser for SIP requests
@@ -8,6 +9,7 @@
 
 -define(NL, <<"\r\n">>).     % New line
 -define(BL, <<"\r\n\r\n">>). % Blank line
+-define(ENC_MIME_BOUNDARY, <<"MIME_boundary_h7Fc5n9R02KqpLiJ6FN8">>).
 
 decode(Message) when is_binary(Message) ->
     case decode_as_proplist(Message) of
@@ -123,3 +125,36 @@ parse_keyvals(Chunk, KVSeparator) ->
     [parse_keyval(Line, KVSeparator) || Line <- binary:split(Chunk, ?NL, [global])].
 
 
+%%%==============================================
+%%% Basic encoder for SIP replies
+%%%==============================================
+
+encode({sip_reply, Status, Code, Headers}) 
+  when is_binary(Status), is_integer(Code), is_list(Headers) ->
+    encode({sip_reply, Status, Code, Headers, <<>>});
+
+encode({sip_reply, Status, Code, Headers, MultiParts})
+  when is_binary(Status), is_integer(Code), is_list(Headers), is_list(MultiParts) ->
+    Body = << (<< <<(encode_multipart(MP))/binary>> || MP <- MultiParts >>)/binary, 
+	      "--", ?ENC_MIME_BOUNDARY/binary, "--", ?NL/binary>>,
+    encode({sip_reply, Status, Code, Headers, Body});
+       
+%% replaces Content-Type and Content-Length headers if present
+encode({sip_reply, Status, Code, Headers, Body})
+  when is_binary(Status), is_integer(Code), is_list(Headers), is_binary(Body) ->
+    ContentType = <<"multipart/mixed;boundary=", ?ENC_MIME_BOUNDARY/binary>>,
+    Headers1 = lists:foldl(fun ({K, V}, Acc) -> ecomm_util_proplist:setv(K, V, Acc) end,
+			   Headers, 
+			   [{<<"Content-Type">>, ContentType},
+			    {<<"Content-Length">>, integer_to_binary(size(Body))}]),
+    <<"SIP/2.0 ", (integer_to_binary(Code))/binary, " ", Status/binary, ?NL/binary,
+      << <<K/binary, ": ", V/binary, ?NL/binary>> || {K, V} <- Headers1 >>/binary, ?NL/binary,
+      Body/binary>>.
+    
+
+encode_multipart({ContentType, Headers, Body})
+  when is_binary(ContentType), is_list(Headers), is_binary(Body) ->
+    <<"--", ?ENC_MIME_BOUNDARY/binary, ?NL/binary, 
+      "Content-Type: ", ContentType/binary, ?NL/binary,
+      << <<K/binary, ": ", V/binary, ?NL/binary >> || {K, V} <- Headers >>/binary, ?NL/binary, 
+      Body/binary, ?BL/binary>>.
