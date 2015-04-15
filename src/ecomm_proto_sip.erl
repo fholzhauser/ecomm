@@ -1,7 +1,7 @@
 -module(ecomm_proto_sip).
 
--export([decode/1, decode_as_proplist/1, parse_multipart/1]).
--export([encode/1]).
+-export([decode/1, decode_to_proplist/1, parse_multipart/1]).
+-export([encode/1, encode_from_proplist/1]).
 
 %%%==============================================
 %%% Basic parser for SIP requests
@@ -12,7 +12,7 @@
 -define(ENC_MIME_BOUNDARY, <<"MIME_boundary_h7Fc5n9R02KqpLiJ6FN8">>).
 
 decode(Message) when is_binary(Message) ->
-    case decode_as_proplist(Message) of
+    case decode_to_proplist(Message) of
 	[_ | _] = Props ->
 	    Get = fun (K) -> ecomm_util_proplist:getv(K, Props) end,
 	    ReqVals = [Get(K) || K <- [[meta, method], [meta, uri], headers]],
@@ -30,7 +30,7 @@ decode(Message) when is_binary(Message) ->
 	    Other
     end.
 
-decode_as_proplist(Message) when is_binary(Message) ->
+decode_to_proplist(Message) when is_binary(Message) ->
     lists:foldl(fun (_F, Status) when is_atom(Status) -> 
 			Status;
 		    (F, State) -> 
@@ -152,9 +152,20 @@ encode({sip_reply, Status, Code, Headers, Body})
       Body/binary>>.
     
 
+encode_from_proplist(Props) ->
+    {[Status, Code, Headers], []} = ecomm_util_proplist:mgetv([status, code, headers], Props),
+    encode({sip_reply, Status, Code, Headers,
+	    case ecomm_util_proplist:mgetv([multipart, body], Props) of
+		{_, [multipart, body]} -> <<>>;
+		{[MultiPart, _], [body]} when is_list(MultiPart) -> MultiPart;
+		{[_, Body], [multipart]} when is_binary(Body) -> Body
+	    end}).
+
+
 encode_multipart({ContentType, Headers, Body})
   when is_binary(ContentType), is_list(Headers), is_binary(Body) ->
     <<"--", ?ENC_MIME_BOUNDARY/binary, ?NL/binary, 
       "Content-Type: ", ContentType/binary, ?NL/binary,
       << <<K/binary, ": ", V/binary, ?NL/binary >> || {K, V} <- Headers >>/binary, ?NL/binary, 
       Body/binary, ?BL/binary>>.
+
