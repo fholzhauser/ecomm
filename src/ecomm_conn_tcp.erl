@@ -1,10 +1,16 @@
+%%%===================================================================
+%%% This module is NOT to be used directly, but via:
+%%%
+%%% ecomm_conn_mgr:enable/1
+%%% ecomm_conn_mgr:disable/1
+%%%===================================================================
+
 -module(ecomm_conn_tcp).
 
 -behaviour(gen_server).
 
--export([start_link/1, start_link/2, stop/1]). % API
-
--export([ensure_options/1]). % internal 
+%% Internal API
+-export([ensure_options/1, start_link/1, start_link/2, stop/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]). % callbacks
 
@@ -18,7 +24,7 @@
 	 state       :: term()}).
 	 	 
 %%%===================================================================
-%%% API
+%%% Internal API
 %%%===================================================================
 
 start_link({ConnStatFn, CodecFn, AppHandlerFn}) ->
@@ -124,7 +130,7 @@ handle_close(#ecomm_conn_tcp{socket = Socket, conn_stat = ConnStat, state = AppS
 %%%%%%%%%% no gen_server state here
 
 open(ConnStat, Socket, AppState) ->
-    try ConnStat({open, Socket, AppState}) of
+    try ConnStat({start, Socket, AppState}) of
 	{ok, AppState1} ->
 	    {ok, AppState1};
 	{stop, Reason, AppState1} ->
@@ -191,7 +197,7 @@ send_data(Socket, Packet) ->
     end.
 
 close(ConnStat, Socket, AppState) ->
-    try ConnStat({close, Socket, AppState}) of
+    try ConnStat({stop, Socket, AppState}) of
 	{ok, AppState1} ->
 	    {stop, normal, AppState1}
     catch
