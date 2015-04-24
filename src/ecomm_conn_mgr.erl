@@ -1,15 +1,12 @@
 -module(ecomm_conn_mgr).
 
--export([start/0, 
-	 enable/1,
-	 enable_tcp/4]). % API
+-export([start/0, enable/1, disable/1]). % API
 
--export([echo_callbacks/0,        %% testing - sends back everything
+-export([echo_test/2,
+	 echo_callbacks/0,        %% testing - sends back everything
 	 echo_dump_callbacks/1]). %% testing - also dumps to file
 
 -define(DEFAULT_TCP_ACCEPTORS, 2).
-
--compile(export_all).
 
 %%%==============================================
 %%% Connection manager API
@@ -18,21 +15,30 @@
 start() ->
     ecomm_conn_mgr_sup:start_link().
 
+enable({Protocol, Port, Options, AppHandler}) 
+  when is_function(AppHandler, 1) ->
+    Callbacks = {fun default_conn_stat/1, fun default_codec/1, AppHandler},
+    enable({Protocol, Port, Options, Callbacks});
+enable({Protocol, Port, Options, {Codec, AppHandler}}) 
+  when is_function(Codec, 1), is_function(AppHandler, 1) ->
+    enable({Protocol, Port, Options, {fun default_conn_stat/1, Codec, AppHandler}});
+
 %% TCPOpts - options to gen_tcp:listen ++ [{num_acceptors, integer()}]
 enable({tcp, ListenPort, TCPOpts, Callbacks}) ->
     enable({tcp, ListenPort, TCPOpts, Callbacks, undefined});
 enable({tcp, ListenPort, TCPOpts, Callbacks, AppState}) ->
-    enable_tcp(ListenPort, TCPOpts, Callbacks, AppState).
+    enable_tcp(ListenPort, TCPOpts, Callbacks, AppState);
 
-%% enable({udp, RecvPort, UDPOpts, Callbacks}) ->
-%%     enable({udp, RecvPort, UDPOpts, Callbacks, undefined});
-%% enable({udp, RecvPort, UDPOpts, Callbacks, AppState}) ->
-%%     enable_udp(RecvPort, UDPOpts, Callbacks, AppState).
+enable({udp, RecvPort, UDPOpts, Callbacks}) ->
+    enable({udp, RecvPort, UDPOpts, Callbacks, undefined});
+enable({udp, RecvPort, UDPOpts, Callbacks, AppState}) ->
+    enable_udp(RecvPort, UDPOpts, Callbacks, AppState).
     
 
 disable({tcp, ListenPort}) ->
-    disable_tcp(ListenPort).
-
+    disable_tcp(ListenPort);
+disable({udp, RecvPort}) ->
+    disable_udp(RecvPort).
 
 %%%%%%%%%%
 
@@ -52,17 +58,19 @@ enable_tcp(ListenPort, TCPOpts, {ConnStatFn, CodecFn, AppHandlerFn} = Callbacks,
        is_function(ConnStatFn, 1), is_function(CodecFn, 1), is_function(AppHandlerFn, 1) ->
     case ensure_tcp_options(TCPOpts) of
 	{ok, TCPOpts1, NumAcceptors} ->
-	    CSockFn = fun (Socket) -> start_tcp_handler(Socket, Callbacks, AppState) end,
+	    CSockFn = fun (LSock, CSock) -> 
+			      start_tcp_handler({LSock, CSock}, Callbacks, AppState)
+		      end,
 	    ecomm_tcp_listeners_sup:add_listener_sup(ListenPort, TCPOpts1, CSockFn, NumAcceptors);
 	{error, Reason} ->
 	    {error, Reason}
     end.
 
-start_tcp_handler(Socket, Callbacks, AppState) ->
-    {ok, HandlerPid} = ecomm_conn_tcp:start_link(Callbacks, AppState),
-    case gen_tcp:controlling_process(Socket, HandlerPid) of
+start_tcp_handler({LSock, CSock}, Callbacks, AppState) ->
+    {ok, HandlerPid} = ecomm_conn_tcp:start(Callbacks, AppState),
+    case gen_tcp:controlling_process(CSock, HandlerPid) of
 	ok ->
-	    erlang:send(HandlerPid, {tcp_opened, Socket});
+	    erlang:send(HandlerPid, {tcp_opened, {LSock, CSock}});
 	{error, closed} ->
 	    ecomm_conn_tcp:stop(HandlerPid);
 	{error, Reason} ->
@@ -81,27 +89,53 @@ disable_tcp(ListenPort) when is_integer(ListenPort) ->
 
 %%%%%%%%%%
 
+ensure_udp_options(UDPOpts) ->
+    ecomm_conn_udp:ensure_options({open, UDPOpts}).
 
-%% enable_udp(RecvPort, UDPOpts, {ConnStatFn, CodecFn, AppHandlerFn} = Callbacks, AppState)
-%%   when is_integer(RecvPort),
-%%        is_list(UDPOpts),
-%%        is_function(ConnStatFn, 1), is_function(CodecFn, 1), is_function(AppHandlerFn, 1) ->
-%%     case ensure_udp_options(UDPOpts) of
-%% 	{ok, UDPOpts1} ->
-%% 	    CSockFn = fun (Socket) -> start_udp_handler(Socket, Callbacks, AppState) end,
-%% 	    ecomm_udp_listeners_sup:add_listener_sup(RecvPort, UDPOpts1, CSockFn);
-%% 	{error, Reason} ->
-%% 	    {error, Reason}
-%%     end.
-    
+enable_udp(RecvPort, UDPOpts, {ConnStatFn, CodecFn, AppHandlerFn} = Callbacks, AppState)
+  when is_integer(RecvPort),
+       is_list(UDPOpts),
+       is_function(ConnStatFn, 1), is_function(CodecFn, 1), is_function(AppHandlerFn, 1) ->
+    case ensure_udp_options(UDPOpts) of
+	{ok, UDPOpts1} ->
+	    PacketFn = fun ({LSock, Peer, Packet}) ->
+			       start_udp_handler({LSock, Peer}, Packet, Callbacks, AppState)
+		       end,
+	    ecomm_udp_listeners_sup:add_listener_sup(RecvPort, UDPOpts1, PacketFn);
+	{error, Reason} ->
+	    {error, Reason}
+    end.
+
+start_udp_handler({LSock, Peer}, Packet, Callbacks, AppState) ->
+    {ok, HandlerPid} = ecomm_conn_udp:start(Callbacks, AppState),
+    erlang:send(HandlerPid, {udp, {LSock, Peer}, Packet}).
+
+disable_udp(RecvPort) when is_integer(RecvPort) ->
+    case whereis(ecomm_udp_listener_sup:name(RecvPort)) of
+	undefined ->
+	    {error, not_found};
+	ListenerSup -> 
+	    supervisor:terminate_child(ecomm_udp_listeners_sup, ListenerSup)
+    end.
+
+
+%%%==============================================
+%%% Default pass-through callbacks
+%%%==============================================
+
+default_conn_stat({start, _Protocol, _ProtocolInfo, AppState}) -> {ok, AppState};
+default_conn_stat({stop, _Protocol, _ProtocolInfo, AppState}) -> {ok, AppState}.
+
+default_codec({decode, Packet}) -> {ok, Packet};
+default_codec({encode, Packet}) -> {ok, Packet}.
     
 %%%==============================================
 %%% Testing callbacks
 %%%==============================================
 
 echo_callbacks() ->
-    {fun ({start, _Socket, AppState}) -> {ok, AppState};
-	 ({stop, _Socket, AppState}) -> {ok, AppState}
+    {fun ({start, _Protocol, _ProtocolInfo, AppState}) -> {ok, AppState};
+	 ({stop, _Protocol, _ProtocolInfo, AppState}) -> {ok, AppState}
      end,
      fun ({decode, Packet}) -> {ok, Packet};
 	 ({encode, Packet}) -> {ok, Packet}
@@ -109,8 +143,8 @@ echo_callbacks() ->
      fun ({Line, AppState}) -> {ok, Line, AppState} end}.
 
 echo_dump_callbacks(ToFilename) ->
-    {fun ({start, _Socket, undefined}) -> {ok, ToFilename};
-	 ({stop, _Socket, Filename}) -> {ok, Filename}
+    {fun ({start, _Protocol, _ProtocolInfo, undefined}) -> {ok, ToFilename};
+	 ({stop, _Protocol, _ProtocolInfo, Filename}) -> {ok, Filename}
      end,
      fun ({decode, Packet}) -> {ok, Packet};
 	 ({encode, Packet}) -> {ok, Packet}
@@ -120,14 +154,7 @@ echo_dump_callbacks(ToFilename) ->
 	     {ok, Line, Filename}
      end}.
 
-
 %%%%%%%%%%
 
-%% test() ->
-%%     start(),
-%%     Cs = echo_callbacks(),
-%%     enable({tcp, 11111, [], Cs}).
-
-%% dbgon(ecomm_conn_mgr), [dbgadd(M) || M <- [ecomm_conn_mgr_sup, ecomm_tcp_acceptors_sup, ecomm_tcp_listener_sup, ecomm_tcp_listeners_sup, ecomm_tcp_listener, ecomm_tcp_acceptor]].
-
-
+echo_test(Proto, Port) when Proto == tcp; Proto == udp ->
+    enable({Proto, Port, [], echo_callbacks()}).

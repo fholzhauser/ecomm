@@ -10,29 +10,28 @@
 -behaviour(gen_server).
 
 %% Internal API
--export([ensure_options/1, start_link/1, start_link/2, stop/1]).
+-export([ensure_options/1, start/2, stop/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]). % callbacks
 
 %% internal use only
 -record(ecomm_conn_tcp, 
-	{socket      :: gen_tcp:socket(),
-	 buffer      :: binary(),
-	 conn_stat   :: function(),
-	 codec       :: function(),
-	 app_handler :: function(),
-	 state       :: term()}).
+	{listen_socket :: gen_tcp:socket(),
+	 socket        :: gen_tcp:socket(),
+	 buffer        :: binary(),
+	 conn_stat     :: function(),
+	 codec         :: function(),
+	 app_handler   :: function(),
+	 state         :: term()}).
 	 	 
 %%%===================================================================
 %%% Internal API
 %%%===================================================================
 
-start_link({ConnStatFn, CodecFn, AppHandlerFn}) ->
-    start_link({CodecFn, AppHandlerFn, ConnStatFn}, undefined).
-start_link({ConnStatFn, CodecFn, AppHandlerFn}, InitAppState)
+start({ConnStatFn, CodecFn, AppHandlerFn}, InitAppState)
   when is_function(ConnStatFn, 1), is_function(CodecFn, 1), is_function(AppHandlerFn, 1) ->
     Callbacks = {ConnStatFn, CodecFn, AppHandlerFn},
-    gen_server:start_link(?MODULE, [Callbacks, InitAppState], []).
+    gen_server:start(?MODULE, [Callbacks, InitAppState], []).
 
 stop(Pid) ->
     gen_server:cast(Pid, stop).
@@ -48,11 +47,11 @@ init([{ConnStatFn, CodecFn, AppHandlerFn}, InitAppState]) ->
 			 app_handler = AppHandlerFn,
 			 state = InitAppState}}.
 
-handle_info({tcp_opened, Socket}, #ecomm_conn_tcp{socket = undefined} = S) ->
-    handle_open(S#ecomm_conn_tcp{socket = Socket});
-handle_info({tcp, _Socket, Packet}, S) ->
+handle_info({tcp_opened, {LSock, CSock}}, #ecomm_conn_tcp{socket = undefined} = S) ->
+    handle_open(S#ecomm_conn_tcp{listen_socket = LSock, socket = CSock});
+handle_info({tcp, _CSock, Packet}, S) ->
     handle_data(Packet, S);
-handle_info({tcp_closed, _Socket}, S) ->
+handle_info({tcp_closed, _CSock}, S) ->
     handle_close(S).
 
 handle_cast(stop, State) ->
@@ -79,15 +78,16 @@ ensure_options({listen, Opts}) ->
 
 %%%%%%%%%% result of handle_* functions are results of gen_server:handle_info function
 
-handle_open(#ecomm_conn_tcp{socket = Socket, conn_stat = ConnStat, state = AppState} = S) ->
-    case open(ConnStat, Socket, AppState) of
+handle_open(#ecomm_conn_tcp{listen_socket = LSock, socket = CSock, 
+			    conn_stat = ConnStat, state = AppState} = S) ->
+    case conn_start(ConnStat, {LSock, CSock}, AppState) of
 	{ok, AppState1} ->
-	    {noreply, S#ecomm_conn_tcp{socket = Socket, state = AppState1}};
+	    {noreply, S#ecomm_conn_tcp{state = AppState1}};
 	{stop, Reason, AppState1} ->
-	    {stop, Reason, S#ecomm_conn_tcp{socket = Socket, state = AppState1}}
+	    {stop, Reason, S#ecomm_conn_tcp{state = AppState1}}
     end.
 
-handle_data(PacketIn, #ecomm_conn_tcp{socket = Socket, buffer = Buffer,
+handle_data(PacketIn, #ecomm_conn_tcp{socket = CSock, buffer = Buffer,
 				      codec = Codec, app_handler = AppHandler, 
 				      state = AppState} = S) ->
     case decode(Codec, PacketIn, Buffer) of
@@ -98,7 +98,7 @@ handle_data(PacketIn, #ecomm_conn_tcp{socket = Socket, buffer = Buffer,
 		    case encode(Codec, Reply) of
 			{ok, PacketOut} ->
 			    S2 = S1#ecomm_conn_tcp{state = AppState1},
-			    case send_data(Socket, PacketOut) of
+			    case send_data(CSock, PacketOut) of
 				ok -> 
 				    {noreply, S2};
 				{stop, Reason} ->
@@ -118,8 +118,9 @@ handle_data(PacketIn, #ecomm_conn_tcp{socket = Socket, buffer = Buffer,
 	    {stop, Error, S}
     end.
 
-handle_close(#ecomm_conn_tcp{socket = Socket, conn_stat = ConnStat, state = AppState} = S) ->
-    case close(ConnStat, Socket, AppState) of
+handle_close(#ecomm_conn_tcp{listen_socket = LSock, socket = CSock,
+			     conn_stat = ConnStat, state = AppState} = S) ->
+    case conn_stop(ConnStat, {LSock, CSock}, AppState) of
 	{ok, AppState1} ->
 	    {stop, normal, S#ecomm_conn_tcp{state = AppState1}};
 	{stop, Reason, AppState1} ->
@@ -129,12 +130,14 @@ handle_close(#ecomm_conn_tcp{socket = Socket, conn_stat = ConnStat, state = AppS
 
 %%%%%%%%%% no gen_server state here
 
-open(ConnStat, Socket, AppState) ->
-    try ConnStat({start, Socket, AppState}) of
+conn_start(ConnStat, {LSock, CSock}, AppState) ->
+    try ConnStat({start, tcp, {LSock, CSock}, AppState}) of
 	{ok, AppState1} ->
 	    {ok, AppState1};
 	{stop, Reason, AppState1} ->
-	    {stop, Reason, AppState1}
+	    {stop, Reason, AppState1};
+	_Invalid ->
+	    {stop, {error, tcp_conn_start_return}, AppState}
     catch
 	Ex:Err ->
 	    {stop, {Ex, Err}, AppState}
@@ -150,7 +153,9 @@ decode(Codec, Packet, PrevChunk) ->
 	incomplete ->
 	    {incomplete, Packet1};
 	Error when element(1, Error) == error ->
-	    Error
+	    Error;
+	_Invalid ->
+	    {error, tcp_decode_return}
     catch
 	Ex:Err ->
 	    {Ex, Err}
@@ -167,7 +172,9 @@ control(AppHandler, Request, AppState) ->
 	stop ->
 	    {stop, normal};
 	{stop, Reason} ->
-	    {stop, Reason}
+	    {stop, Reason};
+	_Invalid ->
+	    {stop, {error, tcp_control_return}}
     catch
 	Ex:Err ->
 	    {Ex, Err}
@@ -180,7 +187,7 @@ encode(Codec, Term) ->
 	Error when element(1, Error) == error ->
 	    Error;
 	_Invalid ->
-	    {error, tcp_encode}
+	    {error, tcp_encode_return}
     catch
 	Ex:Err ->
 	    {Ex, Err}
@@ -196,10 +203,12 @@ send_data(Socket, Packet) ->
 	    {stop, {error, Reason}}
     end.
 
-close(ConnStat, Socket, AppState) ->
-    try ConnStat({stop, Socket, AppState}) of
+conn_stop(ConnStat, {LSock, CSock}, AppState) ->
+    try ConnStat({stop, tcp, {LSock, CSock}, AppState}) of
 	{ok, AppState1} ->
-	    {stop, normal, AppState1}
+	    {stop, normal, AppState1};
+	_Invalid ->
+	    {stop, {error, tcp_conn_stop_return}, AppState}
     catch
 	Ex:Err ->
 	    {stop, {Ex, Err}, AppState}

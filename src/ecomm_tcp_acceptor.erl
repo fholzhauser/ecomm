@@ -44,8 +44,8 @@ terminate(_Reason, _State) -> ok.
 
 acceptor_loop(LSock, CSockFn) ->
     case gen_tcp:accept(LSock) of
-	{ok, Sock} ->
-	    CSockFn(Sock), %% CSockFn MUST disown client socket here (with gen_tcp:controlling_process)
+	{ok, CSock} ->
+	    CSockFn(LSock, CSock),% CSockFn MUST disown client socket (via gen_tcp:controlling_process)
 	    acceptor_loop(LSock, CSockFn);
 	{error, Reason} ->
 	    error({ecomm_tcp_acceptor, Reason})

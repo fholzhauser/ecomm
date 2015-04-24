@@ -4,6 +4,8 @@
 
 -export([start_link/0]). % API
 
+-export([kill/0]). % shell testing, development only
+
 -export([init/1]). %% Supervisor callbacks
 
 %% supervision tree looks as:
@@ -28,6 +30,9 @@
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
+kill() ->
+    exit(whereis(?MODULE), kill).
+    
 %%%===================================================================
 %%% Supervisor callbacks
 %%%===================================================================
@@ -35,9 +40,8 @@ start_link() ->
 init([]) ->
     Specs = [{ecomm_tcp_listeners_sup,
 	      {ecomm_tcp_listeners_sup, start_link, []},
-	      permanent, 2000, supervisor, [ecomm_tcp_listeners_sup]}
-	     %% {ecomm_udp_listeners_sup,
-	     %%  {ecomm_udp_listeners_sup, start_link, []},
-	     %%  permanent, 2000, supervisor, [ecomm_udp_listeners_sup]}
-	    ],
+	      permanent, 2000, supervisor, [ecomm_tcp_listeners_sup]},
+	     {ecomm_udp_listeners_sup,
+	      {ecomm_udp_listeners_sup, start_link, []},
+	      permanent, 2000, supervisor, [ecomm_udp_listeners_sup]}],
     {ok, {{one_for_one, 1, 1}, Specs}}.
