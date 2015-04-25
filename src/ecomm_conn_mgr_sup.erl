@@ -21,7 +21,8 @@
 %% |        |- ecomm_tcp_acceptor      |  ecomm_tcp_acceptor_11111_1     |  (worker)
 %% |        |- ecomm_tcp_acceptor      |  ecomm_tcp_acceptor_11111_2     |  (worker)
 %% |- ecomm_udp_listeners_sup          |  ecomm_udp_listeners_sup        |  one_for_one
-%%    |- ecomm_udp_listener            |  ecomm_udp_listener_22222       |  (worker)
+%%    |- ecomm_udp_listener_sup        |  ecomm_udp_listener_sup_22222   |  one_for_one
+%%       |- ecomm_udp_listener         |  ecomm_udp_listener_22222       |  (worker)
 
 %%%===================================================================
 %%% API functions
